@@ -1,15 +1,14 @@
 import asyncio
-import importlib
 import logging
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import soundfile as sf
 import torch
+from qwen_tts import Qwen3TTSModel
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -29,7 +28,7 @@ OUTPUT_DIR = Path(os.getenv("VOICE_CLONE_DATA_DIR", "data"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _model_lock = asyncio.Lock()
-_model: Optional[Any] = None
+_model: Optional[Qwen3TTSModel] = None
 
 
 @dataclass
@@ -51,11 +50,9 @@ def _resolve_torch_dtype(dtype: str):
     return mapping.get(dtype.lower(), torch.bfloat16)
 
 
-def _load_model_sync() -> Any:
+def _load_model_sync() -> Qwen3TTSModel:
     logger.info("Loading model %s on %s", MODEL_NAME, MODEL_DEVICE)
-    qwen_tts = importlib.import_module("qwen_tts")
-    model_cls = getattr(qwen_tts, "Qwen3TTSModel")
-    return model_cls.from_pretrained(
+    return Qwen3TTSModel.from_pretrained(
         MODEL_NAME,
         device_map=MODEL_DEVICE,
         dtype=_resolve_torch_dtype(MODEL_DTYPE),
@@ -63,7 +60,7 @@ def _load_model_sync() -> Any:
     )
 
 
-async def get_model() -> Any:
+async def get_model() -> Qwen3TTSModel:
     global _model
     if _model is not None:
         return _model
@@ -76,7 +73,8 @@ async def get_model() -> Any:
 
 
 def ensure_ffmpeg_installed() -> None:
-    if shutil.which("ffmpeg") is None:
+    result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
+    if result.returncode != 0:
         raise RuntimeError("ffmpeg is required to convert Telegram audio to wav.")
 
 
@@ -113,17 +111,6 @@ def generate_clone_sync(text: str, ref_audio: Path, ref_text: str, output_path: 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(output_path), wavs[0], sr)
     return output_path
-
-
-def dependency_help_message(exc: Exception) -> str:
-    base = str(exc)
-    return (
-        "Model initialization failed. Ensure dependencies are installed correctly:\n"
-        "1) pip uninstall -y telegram\n"
-        "2) pip install -r requirements.txt\n"
-        "3) install ffmpeg and sox, and ensure they are on PATH\n"
-        f"\nOriginal error: {base}"
-    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -205,7 +192,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as exc:
             logger.exception("Model load failed")
             session.state = "await_transcript"
-            await update.message.reply_text(dependency_help_message(exc))
+            await update.message.reply_text(f"Model initialization failed: {exc}")
             return
 
         session.state = "ready"

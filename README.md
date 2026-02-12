@@ -34,18 +34,6 @@ export QWEN_TTS_ATTN="flash_attention_2"  # e.g. sdpa on CPU
 python bot.py
 ```
 
-## Windows troubleshooting
-
-If you get `ImportError: cannot import name 'Update' from 'telegram'`, you installed the wrong package.
-
-```powershell
-pip uninstall -y telegram
-pip install -r requirements.txt
-```
-
-If you see `SoX could not be found!`, install SoX and add it to `PATH`.
-If you see ffmpeg conversion errors, install ffmpeg and add it to `PATH`.
-
 ## Notes
 
 - Telegram voice notes are converted to mono 24kHz WAV through `ffmpeg` before cloning.
