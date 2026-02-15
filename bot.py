@@ -1,34 +1,41 @@
 import asyncio
+import importlib
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import soundfile as sf
 import torch
-from qwen_tts import Qwen3TTSModel
-from telegram import Update
-from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("voice_clone_bot")
+BOT_BUILD = "2026-02-14"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+EXPECTED_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "")
 MODEL_NAME = os.getenv("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 MODEL_DEVICE = os.getenv("QWEN_TTS_DEVICE", "cuda:0")
 MODEL_DTYPE = os.getenv("QWEN_TTS_DTYPE", "bfloat16")
 MODEL_ATTN = os.getenv("QWEN_TTS_ATTN", "flash_attention_2")
-OUTPUT_DIR = Path(os.getenv("VOICE_CLONE_DATA_DIR", "data"))
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = (BASE_DIR / os.getenv("VOICE_CLONE_DATA_DIR", "data")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+GEN_TEMPERATURE = float(os.getenv("QWEN_TTS_TEMPERATURE", "0.8"))
+GEN_TOP_P = float(os.getenv("QWEN_TTS_TOP_P", "0.99"))
+GEN_TOP_K = int(os.getenv("QWEN_TTS_TOP_K", "150"))
+GEN_REPETITION_PENALTY = float(os.getenv("QWEN_TTS_REPETITION_PENALTY", "1.08"))
+
 _model_lock = asyncio.Lock()
-_model: Optional[Qwen3TTSModel] = None
+_model: Optional[Any] = None
+_telegram_components: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -50,9 +57,61 @@ def _resolve_torch_dtype(dtype: str):
     return mapping.get(dtype.lower(), torch.bfloat16)
 
 
-def _load_model_sync() -> Qwen3TTSModel:
+def dependency_help_message(exc: Exception) -> str:
+    base = str(exc)
+    return (
+        "Model initialization failed. Ensure dependencies are installed correctly:\n"
+        "1) pip uninstall -y telegram\n"
+        "2) pip install -r requirements.txt\n"
+        "3) install ffmpeg and sox, and ensure they are on PATH\n"
+        f"\nOriginal error: {base}"
+    )
+
+
+def telegram_dependency_help_message(exc: Exception) -> str:
+    base = str(exc)
+    return (
+        "Telegram dependency setup is invalid.\n"
+        "You must install python-telegram-bot, not telegram.\n"
+        "Run:\n"
+        "1) pip uninstall -y telegram\n"
+        "2) pip install -r requirements.txt\n"
+        f"\nOriginal error: {base}"
+    )
+
+
+def get_telegram_components() -> Dict[str, Any]:
+    global _telegram_components
+    if _telegram_components is not None:
+        return _telegram_components
+
+    telegram_mod = importlib.import_module("telegram")
+    telegram_ext = importlib.import_module("telegram.ext")
+    telegram_constants = importlib.import_module("telegram.constants")
+
+    if not hasattr(telegram_mod, "Update"):
+        raise RuntimeError(
+            "Loaded incorrect `telegram` package (missing Update). "
+            "Uninstall `telegram` and install `python-telegram-bot`."
+        )
+
+    _telegram_components = {
+        "Update": telegram_mod.Update,
+        "Application": telegram_ext.Application,
+        "BotCommand": telegram_mod.BotCommand,
+        "CommandHandler": telegram_ext.CommandHandler,
+        "MessageHandler": telegram_ext.MessageHandler,
+        "filters": telegram_ext.filters,
+        "ChatAction": telegram_constants.ChatAction,
+    }
+    return _telegram_components
+
+
+def _load_model_sync() -> Any:
     logger.info("Loading model %s on %s", MODEL_NAME, MODEL_DEVICE)
-    return Qwen3TTSModel.from_pretrained(
+    qwen_tts = importlib.import_module("qwen_tts")
+    model_cls = getattr(qwen_tts, "Qwen3TTSModel")
+    return model_cls.from_pretrained(
         MODEL_NAME,
         device_map=MODEL_DEVICE,
         dtype=_resolve_torch_dtype(MODEL_DTYPE),
@@ -60,7 +119,7 @@ def _load_model_sync() -> Qwen3TTSModel:
     )
 
 
-async def get_model() -> Qwen3TTSModel:
+async def get_model() -> Any:
     global _model
     if _model is not None:
         return _model
@@ -73,8 +132,7 @@ async def get_model() -> Qwen3TTSModel:
 
 
 def ensure_ffmpeg_installed() -> None:
-    result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
-    if result.returncode != 0:
+    if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required to convert Telegram audio to wav.")
 
 
@@ -107,13 +165,17 @@ def generate_clone_sync(text: str, ref_audio: Path, ref_text: str, output_path: 
         language="English",
         ref_audio=str(ref_audio),
         ref_text=ref_text,
+        temperature=GEN_TEMPERATURE,
+        top_p=GEN_TOP_P,
+        top_k=GEN_TOP_K,
+        repetition_penalty=GEN_REPETITION_PENALTY,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(output_path), wavs[0], sr)
     return output_path
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Any, context: Any) -> None:
     if not update.effective_user or not update.message:
         return
 
@@ -125,7 +187,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def status(update: Any, context: Any) -> None:
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    session = sessions.get(user_id, UserSession())
+    await update.message.reply_text(f"Current state: {session.state}")
+
+
+async def reset(update: Any, context: Any) -> None:
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    sessions[user_id] = UserSession()
+    await update.message.reply_text("Session reset. Send a new voice sample.")
+
+
+async def handle_audio(update: Any, context: Any) -> None:
     if not update.effective_user or not update.message:
         return
 
@@ -153,7 +233,18 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     raw_path = user_dir / f"reference_raw.{ext}"
     wav_path = user_dir / "reference.wav"
 
-    await file_obj.download_to_drive(custom_path=str(raw_path))
+    try:
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        file_bytes = await file_obj.download_as_bytearray()
+        raw_path.write_bytes(file_bytes)
+        logger.info("Saved user audio to %s", raw_path)
+    except Exception as exc:
+        logger.exception("Failed to download audio file")
+        await update.message.reply_text(
+            f"I could not save your audio file to disk: {exc}. "
+            f"Working dir: {Path.cwd()} | Output dir: {OUTPUT_DIR}"
+        )
+        return
 
     try:
         loop = asyncio.get_running_loop()
@@ -168,7 +259,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Got your audio. Now send the transcript text for that audio sample.")
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update: Any, context: Any) -> None:
     if not update.effective_user or not update.message or not update.message.text:
         return
 
@@ -180,7 +271,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if session.state == "await_voice":
-        await update.message.reply_text("Please send your voice sample first.")
+        await update.message.reply_text("Please send your voice sample first. If needed, type /start.")
         return
 
     if session.state == "await_transcript":
@@ -192,7 +283,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as exc:
             logger.exception("Model load failed")
             session.state = "await_transcript"
-            await update.message.reply_text(f"Model initialization failed: {exc}")
+            await update.message.reply_text(dependency_help_message(exc))
             return
 
         session.state = "ready"
@@ -205,7 +296,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Run /start and complete setup first.")
         return
 
-    await update.message.reply_chat_action(ChatAction.RECORD_VOICE)
+    components = get_telegram_components()
+    chat_action = components["ChatAction"]
+    await update.message.reply_chat_action(chat_action.RECORD_VOICE)
     output_path = OUTPUT_DIR / str(user_id) / "output_voice_clone.wav"
     try:
         model = await get_model()
@@ -228,29 +321,96 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Generation failed: {exc}")
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Any, context: Any) -> None:
     if not update.message:
         return
     await update.message.reply_text(
         "/start - begin setup\n"
+        "/status - show your current state\n"
+        "/reset - reset your session\n"
         "1) send a voice sample\n"
         "2) send transcript\n"
         "3) send text to synthesize"
     )
 
 
+async def on_error(update: object, context: Any) -> None:
+    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(
+            "An internal error occurred while processing your request. "
+            "Please try /reset and send your audio again."
+        )
+
+
+async def post_init(application: Any) -> None:
+    me = await application.bot.get_me()
+    username = f"@{me.username}" if me.username else "(no username)"
+    logger.info("Connected bot identity: %s (id=%s)", username, me.id)
+
+    if EXPECTED_BOT_USERNAME:
+        expected = EXPECTED_BOT_USERNAME.lstrip("@")
+        current = (me.username or "").lstrip("@")
+        if expected.lower() != current.lower():
+            raise RuntimeError(
+                f"Token belongs to @{current}, but TELEGRAM_BOT_USERNAME expects @{expected}."
+            )
+
+    components = get_telegram_components()
+    command_cls = components["BotCommand"]
+    await application.bot.set_my_commands(
+        [
+            command_cls("start", "begin setup"),
+            command_cls("status", "show current setup state"),
+            command_cls("reset", "reset your voice-clone session"),
+            command_cls("help", "show help"),
+        ]
+    )
+
+
+
+
+def log_runtime_context() -> None:
+    logger.info("Bot build: %s", BOT_BUILD)
+    logger.info("Running script: %s", Path(__file__).resolve())
+    logger.info("Working directory: %s", Path.cwd())
+    logger.info("Output directory: %s", OUTPUT_DIR)
+    logger.info(
+        "Generation params: temperature=%s, top_p=%s, top_k=%s, repetition_penalty=%s",
+        GEN_TEMPERATURE,
+        GEN_TOP_P,
+        GEN_TOP_K,
+        GEN_REPETITION_PENALTY,
+    )
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN environment variable.")
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.ALL, handle_audio))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    try:
+        components = get_telegram_components()
+    except Exception as exc:
+        raise RuntimeError(telegram_dependency_help_message(exc)) from exc
 
+    app_builder = components["Application"]
+    command_handler = components["CommandHandler"]
+    message_handler = components["MessageHandler"]
+    update_cls = components["Update"]
+    f = components["filters"]
+
+    app = app_builder.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(command_handler("start", start))
+    app.add_handler(command_handler("help", help_command))
+    app.add_handler(command_handler("status", status))
+    app.add_handler(command_handler("reset", reset))
+    app.add_handler(message_handler(f.VOICE | f.AUDIO | f.Document.ALL, handle_audio))
+    app.add_handler(message_handler(f.TEXT & ~f.COMMAND, handle_text))
+    app.add_error_handler(on_error)
+
+    log_runtime_context()
     logger.info("Starting Telegram bot")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=update_cls.ALL_TYPES)
 
 
 if __name__ == "__main__":
