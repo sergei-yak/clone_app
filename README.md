@@ -1,0 +1,73 @@
+# Telegram Voice Clone Bot (Qwen3-TTS)
+
+A Telegram bot that collects a user's voice sample + transcript, then generates cloned speech from future text prompts.
+
+## Flow
+
+1. User sends `/start`.
+2. Bot asks for a voice sample.
+3. Bot asks for transcript of that voice sample.
+4. Bot initializes Qwen3-TTS and marks the session ready.
+5. User sends any text and receives synthesized audio in cloned voice.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Set environment variables:
+
+```bash
+export TELEGRAM_BOT_TOKEN="<your bot token>"
+export TELEGRAM_BOT_USERNAME="@Data_chatbot"   # optional safety check
+export QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+export QWEN_TTS_DEVICE="cuda:0"      # or cpu
+export QWEN_TTS_DTYPE="bfloat16"     # float32/float16/bfloat16
+export QWEN_TTS_ATTN="flash_attention_2"  # e.g. sdpa on CPU
+```
+
+## Run
+
+```bash
+python bot.py
+```
+
+You should see a log like `Connected bot identity: @Data_chatbot (...)`.
+That confirms your token is connected to the expected bot.
+
+## Commands
+
+- `/start` begin setup
+- `/status` show current setup state for your chat
+- `/reset` reset your session and start over
+- `/help` help text
+
+## Windows troubleshooting
+
+If you get `ImportError: cannot import name 'Update' from 'telegram'`, you installed the wrong package.
+
+```powershell
+pip uninstall -y telegram
+pip install -r requirements.txt
+```
+
+If you see `SoX could not be found!`, install SoX and add it to `PATH`.
+If you see ffmpeg conversion errors, install ffmpeg and add it to `PATH`.
+
+If traceback still shows `download_to_drive(custom_path=...)` at `bot.py` line ~156, you are running an old copy of the script.
+Make sure you run the updated `bot.py` in this repository folder.
+
+## Why bot may appear "not responding"
+
+- If running in a group, Telegram privacy settings may block non-command messages.
+  Test first in private chat with `@Data_chatbot` and `/start`.
+- This app only generates audio after you provide **both** reference audio and transcript.
+
+## Notes
+
+- Telegram voice notes are converted to mono 24kHz WAV through `ffmpeg` before cloning.
+- User session state is in-memory. Generated files are saved to `data/<telegram_user_id>/`.
+- For production: persist session state and add queueing/rate limits.
