@@ -1,4 +1,4 @@
-python-telegram-bot==22.6
+python-telegram-bot==21.6
 torch
 soundfile
 qwen-tts
