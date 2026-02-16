@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("voice_clone_bot")
 BOT_BUILD = "2026-02-15"
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "6650388778:AAFu4DBe4FckO2zPUUUlLHCcwTtZvs--UCM")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 EXPECTED_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "")
 MODEL_NAME = os.getenv("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 MODEL_DEVICE = os.getenv("QWEN_TTS_DEVICE", "cuda:0")
