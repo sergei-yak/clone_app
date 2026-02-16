@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("voice_clone_bot")
 BOT_BUILD = "2026-02-15"
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "6650388778:AAFu4DBe4FckO2zPUUUlLHCcwTtZvs--UCM")
 EXPECTED_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "")
 MODEL_NAME = os.getenv("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 MODEL_DEVICE = os.getenv("QWEN_TTS_DEVICE", "cuda:0")
@@ -32,6 +32,7 @@ GEN_TEMPERATURE = float(os.getenv("QWEN_TTS_TEMPERATURE", "0.8"))
 GEN_TOP_P = float(os.getenv("QWEN_TTS_TOP_P", "0.99"))
 GEN_TOP_K = int(os.getenv("QWEN_TTS_TOP_K", "150"))
 GEN_REPETITION_PENALTY = float(os.getenv("QWEN_TTS_REPETITION_PENALTY", "1.08"))
+DEFAULT_CLONE_LANGUAGE = os.getenv("QWEN_TTS_DEFAULT_LANGUAGE", "English")
 
 _model_lock = asyncio.Lock()
 _model: Optional[Any] = None
@@ -42,6 +43,7 @@ _telegram_components: Optional[Dict[str, Any]] = None
 class UserSession:
     state: str = "await_voice"
     ref_audio_path: Optional[Path] = None
+    ref_language: Optional[str] = None
     ref_text: Optional[str] = None
 
 
@@ -155,14 +157,14 @@ def convert_audio_to_wav(input_path: Path, output_path: Path) -> None:
         raise RuntimeError(f"ffmpeg failed: {process.stderr.strip()}")
 
 
-def generate_clone_sync(text: str, ref_audio: Path, ref_text: str, output_path: Path) -> Path:
+def generate_clone_sync(text: str, ref_audio: Path, ref_text: str, language: str, output_path: Path) -> Path:
     model = _model
     if model is None:
         raise RuntimeError("Model not loaded.")
 
     wavs, sr = model.generate_voice_clone(
         text=text,
-        language="English",
+        language=language,
         ref_audio=str(ref_audio),
         ref_text=ref_text,
         temperature=GEN_TEMPERATURE,
@@ -182,8 +184,8 @@ async def start(update: Any, context: Any) -> None:
     user_id = update.effective_user.id
     sessions[user_id] = UserSession()
     await update.message.reply_text(
-        "Hi! Send me a voice sample (voice note/audio/document). Then send the exact transcript for that sample. "
-        "After that I will clone your voice and generate speech from your text."
+        "Hi! Send me a voice sample (voice note/audio/document). Then send the language of that sample "
+        "and the exact transcript. After that I will clone your voice and generate speech from your text."
     )
 
 
@@ -193,7 +195,8 @@ async def status(update: Any, context: Any) -> None:
 
     user_id = update.effective_user.id
     session = sessions.get(user_id, UserSession())
-    await update.message.reply_text(f"Current state: {session.state}")
+    lang = session.ref_language or "(not set)"
+    await update.message.reply_text(f"Current state: {session.state} | language: {lang}")
 
 
 async def reset(update: Any, context: Any) -> None:
@@ -255,8 +258,10 @@ async def handle_audio(update: Any, context: Any) -> None:
         return
 
     session.ref_audio_path = wav_path
-    session.state = "await_transcript"
-    await update.message.reply_text("Got your audio. Now send the transcript text for that audio sample.")
+    session.state = "await_language"
+    await update.message.reply_text(
+        "Got your audio. Now send the language for this sample (for example: English, Spanish, Russian)."
+    )
 
 
 async def handle_text(update: Any, context: Any) -> None:
@@ -274,8 +279,16 @@ async def handle_text(update: Any, context: Any) -> None:
         await update.message.reply_text("Please send your voice sample first. If needed, type /start.")
         return
 
+    if session.state == "await_language":
+        session.ref_language = text
+        session.state = "await_transcript"
+        await update.message.reply_text("Language saved. Now send the transcript text for that audio sample.")
+        return
+
     if session.state == "await_transcript":
         session.ref_text = text
+        if not session.ref_language:
+            session.ref_language = DEFAULT_CLONE_LANGUAGE
         session.state = "warming_up"
         await update.message.reply_text("Transcript saved. Initializing model, please wait...")
         try:
@@ -292,7 +305,7 @@ async def handle_text(update: Any, context: Any) -> None:
         )
         return
 
-    if session.state != "ready" or not session.ref_audio_path or not session.ref_text:
+    if session.state != "ready" or not session.ref_audio_path or not session.ref_text or not session.ref_language:
         await update.message.reply_text("Run /start and complete setup first.")
         return
 
@@ -312,6 +325,7 @@ async def handle_text(update: Any, context: Any) -> None:
             text,
             session.ref_audio_path,
             session.ref_text,
+            session.ref_language,
             output_path,
         )
 
@@ -329,8 +343,9 @@ async def help_command(update: Any, context: Any) -> None:
         "/status - show your current state\n"
         "/reset - reset your session\n"
         "1) send a voice sample\n"
-        "2) send transcript\n"
-        "3) send text to synthesize"
+        "2) send language\n"
+        "3) send transcript\n"
+        "4) send text to synthesize"
     )
 
 
@@ -376,6 +391,7 @@ def log_runtime_context() -> None:
     logger.info("Running script: %s", Path(__file__).resolve())
     logger.info("Working directory: %s", Path.cwd())
     logger.info("Output directory: %s", OUTPUT_DIR)
+    logger.info("Default clone language: %s", DEFAULT_CLONE_LANGUAGE)
     logger.info(
         "Generation params: temperature=%s, top_p=%s, top_k=%s, repetition_penalty=%s",
         GEN_TEMPERATURE,
